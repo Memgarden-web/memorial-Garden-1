@@ -185,36 +185,50 @@ export function createHandler(getStore) {
     if (a === "checkout" && method === "POST") {
       if (!me) throw bad("Please sign in.", 401);
       const j = await body();
-      const PLANS = { lifetime: { amount: 7900, name: "Sweet Solace Lifetime Plan" }, family: { amount: 12900, name: "Sweet Solace Family Plan (5 memorials)" } };
+      const PLANS = {
+        lifetime: { amount_cents: 7900, currency: "USD", name: "Sweet Solace Lifetime Plan" },
+        family:   { amount_cents: 12900, currency: "USD", name: "Sweet Solace Family Plan (5 memorials)" },
+      };
       const plan = PLANS[j.plan];
       if (!plan) throw bad("Invalid plan.");
       const hpKey = process.env.HANDYPAY_API_KEY;
       if (!hpKey) throw bad("Payment is not yet configured. Please contact us at admin@kwickbiz.biz to upgrade.", 503);
-      // Create a HandyPay checkout session
-      const successUrl = `${origin}/plans?upgraded=${j.plan}`;
-      const cancelUrl = `${origin}/plans`;
-      const r = await fetch("https://api.handypay.me/v1/checkout/sessions", {
+
+      const successUrl = `${origin}/plans?upgraded=${encodeURIComponent(j.plan)}`;
+      const cancelUrl  = `${origin}/plans`;
+      const idempotencyKey = rid(16); // unique per attempt — prevents double-charges on retry
+
+      // POST /v1/payment-sessions — official HandyPay API shape (from plugin source)
+      const r = await fetch("https://api.handypay.me/v1/payment-sessions", {
         method: "POST",
-        headers: { "Authorization": `Bearer ${hpKey}`, "Content-Type": "application/json" },
+        headers: {
+          "Authorization":   `Bearer ${hpKey}`,
+          "Content-Type":    "application/json",
+          "Accept":          "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
         body: JSON.stringify({
-          amount: plan.amount,
-          currency: "USD",
-          description: plan.name,
+          line_items: [{ amount: plan.amount_cents, currency: plan.currency, name: plan.name, quantity: 1 }],
+          success_url:    successUrl,
+          cancel_url:     cancelUrl,
           customer_email: me.e,
-          success_url: successUrl,
-          cancel_url: cancelUrl,
-          metadata: { plan: j.plan, email: me.e },
+          metadata:       { plan: j.plan, email: me.e },
         }),
       });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        console.error("HandyPay error", r.status, data);
-        throw bad("Payment session could not be created. Please try again or contact admin@kwickbiz.biz.", 502);
-      }
-      // HandyPay returns a hosted checkout URL
-      const checkoutUrl = data.url || data.checkout_url || data.redirect_url;
-      if (!checkoutUrl) throw bad("Payment provider returned an unexpected response.", 502);
-      return J({ url: checkoutUrl });
+
+      let data = {};
+      const raw = await r.text();
+      try { data = JSON.parse(raw); } catch (_) {}
+      console.log("HandyPay response", r.status, raw.slice(0, 500));
+
+      // Response envelope: { success: bool, data: { url, ... } }
+      if (data?.success && data?.data?.url) return J({ url: data.data.url });
+      // Some API versions return url at root on success
+      if (r.ok && (data?.url || data?.checkout_url)) return J({ url: data.url || data.checkout_url });
+
+      const errMsg = data?.error?.message || data?.message || `HTTP ${r.status}`;
+      console.error("HandyPay error", r.status, errMsg);
+      throw bad(`Payment session could not be created: ${errMsg}. Please try again or contact admin@kwickbiz.biz.`, 502);
     }
 
     if (a === "sitemap" && method === "GET") {
@@ -289,26 +303,36 @@ export function createHandler(getStore) {
 
     // ---- HandyPay webhook ----
     if (a === "webhook" && method === "POST") {
+      const raw = await req.text();
       const secret = process.env.HANDYPAY_WEBHOOK_SECRET;
       if (secret) {
-        const sig = req.headers.get("handypay-signature") || req.headers.get("x-handypay-signature") || "";
-        const raw = await req.text();
+        // Header: "X-HandyPay-Signature: sha256=<hex>" (from webhook.php source)
+        let sig = req.headers.get("x-handypay-signature") || req.headers.get("handypay-signature") || "";
+        if (sig.toLowerCase().startsWith("sha256=")) sig = sig.slice(7);
         const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
-        if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-          return new Response("Invalid signature", { status: 401 });
-        }
-        const ev = JSON.parse(raw);
-        if (ev.type === "payment.succeeded" || ev.type === "checkout.completed") {
-          const email = (ev.data?.customer_email || ev.data?.metadata?.email || "").toLowerCase();
-          const plan = ev.data?.metadata?.plan || "lifetime";
-          if (email) {
-            const key = "u/" + hex(email);
-            const u = await db().get(key, { type: "json" });
-            if (u) { u.plan = plan; u.planDate = Date.now(); await db().setJSON(key, u); }
-          }
+        const eBuf = Buffer.from(expected, "utf8"), sBuf = Buffer.from(sig.padEnd(expected.length), "utf8");
+        if (eBuf.length !== sBuf.length || !crypto.timingSafeEqual(eBuf, sBuf)) {
+          return new Response(JSON.stringify({ error: "invalid_signature" }), { status: 401 });
         }
       }
-      return new Response("ok", { status: 200 });
+      let ev = {};
+      try { ev = JSON.parse(raw); } catch (_) {}
+      if (!ev.type) return new Response("ok", { status: 200 });
+
+      // Event names from webhook.php: payment-session.completed, checkout.session.completed
+      const paid = ["payment-session.completed", "checkout.session.completed",
+                    "checkout.session.async_payment_succeeded", "payment_intent.succeeded"];
+      if (paid.includes(ev.type)) {
+        const d = ev.data || {};
+        const email = (d.customer_email || d.metadata?.email || "").toLowerCase();
+        const plan  = d.metadata?.plan || "lifetime";
+        if (email) {
+          const key = "u/" + hex(email);
+          const u = await db().get(key, { type: "json" });
+          if (u) { u.plan = plan; u.planDate = Date.now(); await db().setJSON(key, u); }
+        }
+      }
+      return new Response(JSON.stringify({ received: true }), { status: 200 });
     }
 
     if (a !== "memorials") throw bad("Not found.", 404);
