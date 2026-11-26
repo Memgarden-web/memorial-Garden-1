@@ -138,7 +138,12 @@ const shell=()=>`<header style="top:env(safe-area-inset-top,0px)" class="sticky 
 </div>`;
 let tI=0;
 let RT=0;
-async function route(){const h=curH(),tk=++RT;let m;try{if(h=='home'||h=='find'||h=='admin'||(h=='create'&&S.step==3))await loadList();else if(m=h.match(/^memorial-(.+)-(about|timeline|photos|tributes)$/))await Promise.all([loadDetail(m[1]),DB.list?0:loadList()]);else if(m=h.match(/^admin-(.+)$/))await loadDetail(m[1]);else if(m=h.match(/^dashboard-(.+)$/))await loadDetail(m[1])}catch(e){}if(tk==RT)draw()}
+async function route(){const h=curH(),tk=++RT;
+// Draw immediately with whatever data we already have (makes navigation feel instant)
+draw();
+let m;try{if(h=='home'||h=='find'||h=='admin'||(h=='create'&&S.step==3))await loadList();else if(m=h.match(/^memorial-(.+)-(about|timeline|photos|tributes)$/))await Promise.all([loadDetail(m[1]),DB.list?0:loadList()]);else if(m=h.match(/^admin-(.+)$/))await loadDetail(m[1]);else if(m=h.match(/^dashboard-(.+)$/))await loadDetail(m[1])}catch(e){}
+// Redraw with fresh data only if no newer navigation has started
+if(tk==RT)draw()}
 function draw(){const h=curH();const v=$('#view');document.title='Sweet Solace — Online Memorial Websites';v.innerHTML=h.startsWith('memorial-')&&!P[h]?memorialPage(h):h.startsWith('admin-')?adminEdit(h.slice(6)):h.startsWith('dashboard-')?dashboardPage(h.slice(10)):(P[h]||P.home)();window.scrollTo(0,0);$('#mm')?.classList.add('hidden');
 v.querySelectorAll('[data-count]').forEach(e=>{const t=+e.dataset.count,s=performance.now();(function f(n){const p=Math.min(1,(n-s)/1400);e.textContent=Math.round(t*p).toLocaleString();if(p<1)requestAnimationFrame(f)})(s)});
 if($('#tq'))tst(0)}
@@ -201,7 +206,7 @@ phu:async(d,f)=>{const id=f.dataset.id,o=$('#phum');if(!d.url){o.textContent='Pl
 document.addEventListener('change',e=>{const i=e.target.closest('[data-ph]');if(!i)return;const id=i.dataset.ph,fs=[...i.files];mut(async()=>{for(const file of fs){const u=await new Promise(res=>{const r=new FileReader();r.onload=()=>{const im=new Image();im.onload=()=>{const k=Math.min(1,640/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=im.width*k;c.height=im.height*k;c.getContext('2d').drawImage(im,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.7))};im.src=r.result};r.readAsDataURL(file)});await api('memorials/'+id+'/photos',{method:'POST',body:{photo:u}})}})});
 const pathFor=n=>{let m;if(n=='home')return '/';if(P[n]||n=='admin'||n=='reset-password')return '/'+n;if(m=n.match(/^dashboard-(.+)$/))return '/dashboard/'+m[1];if(m=n.match(/^admin-(.+)$/))return '/admin/'+m[1];if(m=n.match(/^memorial-(.+)-(about|timeline|photos|tributes)$/))return '/'+m[1]+'/'+m[2];if(m=n.match(/^memorial-(.+)$/))return '/'+m[1];return '/'+n};
 const curH=()=>{const s=location.pathname.split('/').filter(Boolean).map(decodeURIComponent);if(!s.length)return 'home';if(s[0]=='admin')return s[1]?'admin-'+s[1]:'admin';if(s[0]=='dashboard')return s[1]?'dashboard-'+s[1]:'admin';if(s[0]=='reset-password')return 'reset-password';if(s.length==1)return P[s[0]]?s[0]:'memorial-'+s[0]+'-about';return 'memorial-'+s[0]+'-'+s[1]};
-const nav=n=>{const p=pathFor(n);if(p!=location.pathname)history.pushState({},'',p);route()};
+const nav=n=>{const p=pathFor(n);if(p!=location.pathname)history.pushState({},'',p);route()};  // route() draws immediately then re-draws after fetch
 document.addEventListener('click',e=>{const a=e.target.closest('a[href^="#"]');if(!a||e.metaKey||e.ctrlKey||e.shiftKey)return;const n=a.getAttribute('href').slice(1);if(!n)return;e.preventDefault();nav(n)});
 const post=(name,f)=>fetch('/',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({'form-name':name,...f}).toString()}).catch(()=>{});
 FORMS.ct=d=>{const o=$('#ctm');o.textContent='Sending…';fetch('/',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({'form-name':'contact',name:d.n,email:d.e,message:d.m}).toString()}).then(r=>{if(!r.ok)throw 0;o.textContent='Thank you — your message has been sent.';$('[data-f=ct]').reset()}).catch(()=>{o.textContent='Sorry, something went wrong. Please email admin@kwickbiz.biz.'})};
@@ -217,16 +222,19 @@ document.addEventListener('click',e=>{
   if(t.id==='lb-close'||t.id==='lb')lbClose();
   if(t.id==='lb-prev')lbStep(-1);
   if(t.id==='lb-next')lbStep(1);
-  // Click on gallery image — only inside the photos tab grid
+});
+// Capture-phase listener fires before the nav link handler — gallery images only
+document.addEventListener('click',e=>{
+  const t=e.target;
   if(t.tagName==='IMG'&&t.closest('[data-photo-gallery]')){
     const gallery=t.closest('[data-photo-gallery]');
     const imgs=[...gallery.querySelectorAll('img')].map(i=>i.src);
     const idx=Math.max(0,imgs.indexOf(t.src));
     lbOpen(imgs,idx);
+    e.stopPropagation(); // prevent the nav link handler from also firing
     e.preventDefault();
-    return;
   }
-});
+},true); // true = capture phase
 document.addEventListener('keydown',e=>{
   const lb=$('#lb');if(!lb||lb.classList.contains('hidden'))return;
   if(e.key==='Escape')lbClose();

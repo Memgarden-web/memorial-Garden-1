@@ -198,8 +198,8 @@ export function createHandler(getStore) {
       const cancelUrl  = `${origin}/plans`;
       const idempotencyKey = rid(16); // unique per attempt — prevents double-charges on retry
 
-      // POST /v1/payment-sessions — official HandyPay API shape (from plugin source)
-      const r = await fetch("https://api.handypay.me/v1/payment-sessions", {
+      // POST /api/v1/payment-sessions — correct base URL per HandyPay developer docs
+      const r = await fetch("https://api.handypay.me/api/v1/payment-sessions", {
         method: "POST",
         headers: {
           "Authorization":   `Bearer ${hpKey}`,
