@@ -115,7 +115,7 @@ export function createHandler(getStore) {
     return s;
   };
   const yr = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 1000 || n > 2100) throw bad("Invalid year."); return n; };
-  const pub = (r, me) => ({ id: r.id, name: r.name, b: r.b, d: r.d, cat: r.cat, story: r.story, pic: r.pv ? `/api/img/${r.id}/pic?v=${r.pv}` : "", mine: !!(me && r.owner === me.e), music: r.mine || (me && r.owner===me.e) ? (r.music||"") : (r.music||""), musicOn: !!r.musicOn, isPrivate: !!r.isPrivate, tributeMode: r.tributeMode||"open" });
+  const pub = (r, me) => ({ id: r.id, name: r.name, b: r.b, d: r.d, cat: r.cat, story: r.story, pic: r.pv ? `/api/img/${r.id}/pic?v=${r.pv}` : "", accentColor: r.accentColor || "", mine: !!(me && r.owner === me.e), music: r.music||"", musicOn: !!r.musicOn, isPrivate: !!r.isPrivate, tributeMode: r.tributeMode||"open" });
   const owned = async (id, me) => {
     if (!me) throw bad("Please sign in.", 401);
     const r = await getRec(id);
@@ -472,7 +472,12 @@ export function createHandler(getStore) {
         if (!CATS.has(j.cat)) throw bad("Invalid category.");
         const slug = (first + "-" + last).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "memorial";
         const id = slug + "-" + rid(2);
-        const rec = { id, name: first + " " + last, b: bY, d: dY, cat: j.cat, story: str(j.story || "Remembered with love.", 5000, 1), owner: me.e, pv: 0, photos: [], events: [], created: Date.now() };
+        let accentColor = "";
+        if (j.accentColor) {
+          const c = String(j.accentColor).trim();
+          if (/^#[0-9a-fA-F]{6}$/.test(c)) accentColor = c;
+        }
+        const rec = { id, name: first + " " + last, b: bY, d: dY, cat: j.cat, story: str(j.story || "Remembered with love.", 5000, 1), owner: me.e, pv: 0, accentColor, photos: [], events: [], created: Date.now() };
         if (j.pic) { await putImg(id + "/pic", j.pic); rec.pv = Date.now(); }
         await saveRec(rec);
         // Welcome email (non-blocking)
@@ -486,6 +491,15 @@ export function createHandler(getStore) {
     if (!okId(b)) throw bad("Not found.", 404);
     const rec = await getRec(b);
     if (!rec && !SEED.has(b)) throw bad("Not found.", 404);
+
+    // Privacy check: private memorials are visible only to their owner.
+    // For everyone else (signed-out or signed-in as a different account)
+    // the memorial is treated as "Not found" — so the direct link no
+    // longer reveals it. Owners must be signed in to view their own
+    // private memorials.
+    if (rec && rec.isPrivate && (!me || rec.owner !== me.e)) {
+      throw bad("Not found.", 404);
+    }
 
     if (!c) {
       if (method === "GET") {
@@ -586,6 +600,11 @@ export function createHandler(getStore) {
         if (!["open","moderated","closed"].includes(j.tributeMode)) throw bad("Invalid tribute mode.");
         r.tributeMode = j.tributeMode;
       }
+      if ("accentColor" in j) {
+        const c = String(j.accentColor || "").trim();
+        if (c && !/^#[0-9a-fA-F]{6}$/.test(c)) throw bad("Invalid colour — expected a hex value like #0ea5e9.");
+        r.accentColor = c;
+      }
       await saveRec(r); return J({ ok: true });
     }
 
@@ -633,6 +652,3 @@ export function createHandler(getStore) {
     }
   };
 }
-// ---- PATCH: extend handle() to cover new routes ----
-// We monkey-patch by wrapping the exported factory.
-import { createHandler as _orig } from "./handler.mjs";

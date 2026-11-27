@@ -27,18 +27,51 @@ and **MY ACCOUNT** / **SIGN OUT** when logged in — both on desktop and the mob
   on Home / Find a Memorial.
 - Memorials with no colour chosen keep the original name-based gradient as before.
 
-### 3. Site Owner Admin panel (`/site-admin`)
-Visible only to the account whose email matches `SITE_OWNER_EMAIL`. From here the owner can:
-- **Edit plan pricing** — name, price label, tagline, amount (in cents), and feature list
-  for each of the 3 plans. Changes take effect immediately for every visitor, no redeploy.
-- **Edit general settings** — site tagline, support email.
-- **Review pending refund requests** — approve (best-effort calls HandyPay's refund API
-  if `HANDYPAY_API_KEY` is set) or decline.
-- **See recent signups** — email, plan, signup date.
+### 3. Site Owner Admin panel (`/site-admin`) — STANDALONE
+The Site Admin portal is now a **standalone** page with a clean, minimal layout — no main
+site header, navigation, or footer. It is reachable **only** via its direct URL
+(`/site-admin`) — the link has been removed from the main site header and mobile menu to
+keep the access path clean and unambiguous.
 
-A link to Site Admin appears in the header and mobile menu only for the owner account.
+What the Site Admin page shows:
+- **If you are signed-out** → a clean sign-in form (the public site is hidden behind it).
+- **If you are signed-in but NOT the site owner** → a "Not authorised" page with a sign-out button.
+- **If you are signed-in as the site owner** (email matches `SITE_OWNER_EMAIL`) → the full
+  Site Owner Dashboard:
+  - **Edit plan pricing** — name, price label, tagline, amount (in cents), and feature list
+    for each of the 3 plans. Changes take effect immediately for every visitor, no redeploy.
+  - **Edit general settings** — site tagline, support email.
+  - **Review pending refund requests** — approve (best-effort calls HandyPay's refund API
+    if `HANDYPAY_API_KEY` is set) or decline.
+  - **See recent signups** — email, plan, signup date.
 
-### 4. Refund requests (`/request-refund`)
+The regular per-memorial Admin panel (`/admin/:id`) and Creator Dashboard
+(`/dashboard/:id`) remain unchanged.
+
+### 4. Background music on memorial pages — FIXED
+- The music bar no longer hides behind the portrait — it now sits cleanly below the
+  portrait / name / actions row.
+- The Play / Pause button reflects the **actual** audio state (was previously hard-coded
+  to "Pause" whenever the dashboard Autoplay toggle was on, even when the browser had
+  blocked autoplay).
+- Browsers' autoplay policy is respected: if `musicOn` is enabled in the dashboard, the
+  page tries to start playback on load; if the browser blocks it, the button falls back
+  to "Play music" so the visitor can start it with a click.
+- The dashboard help text now warns that **only direct audio-file URLs (`.mp3` / `.ogg`)
+  work** — web pages like SoundCloud, Mixcloud, or `archive.org/details/...` cannot be
+  played by the `<audio>` element and should not be used.
+
+### 5. Private memorials — now actually private
+Setting a memorial to **Private** in the Dashboard now genuinely hides it:
+- Anonymous visitors and signed-in non-owners receive a **404 / "Not found"** response
+  when they hit the direct URL — they cannot view the page, light candles, or post tributes.
+- The memorial is excluded from the public Find a Memorial listing (this was already the case).
+- Only the signed-in owner can view, edit, or interact with their own private memorials.
+
+If you previously relied on the old behaviour ("the direct link still works for anyone
+who has it"), you will now need to share login credentials or keep the memorial public.
+
+### 6. Refund requests (`/request-refund`)
 Signed-in users can submit a refund request (plan + optional reason) from a link on the
 Plans page. It lands in the Site Admin's pending-refunds queue for review — this is a
 manual-approval workflow, not an automatic instant refund, which is the safer default for
