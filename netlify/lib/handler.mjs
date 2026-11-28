@@ -127,7 +127,7 @@ export function createHandler(getStore) {
   const stats = async (id) => (await db().get("s/" + id, { type: "json" })) || { c: 0, v: 0 };
   async function tributes(id) {
     const { blobs } = await db().list({ prefix: `t/${id}/` });
-    const all = await Promise.all(blobs.slice(0, 300).map((b) => db().get(b.key, { type: "json" }).then((t) => t && { k: b.key.split("/").pop(), n: t.n, m: t.m })));
+    const all = await Promise.all(blobs.slice(0, 300).map((b) => db().get(b.key, { type: "json" }).then((t) => t && { k: b.key.split("/").pop(), n: t.n, m: t.m, pending: !!t.pending })));
     return all.filter(Boolean).sort((a, b) => parseInt(b.k) - parseInt(a.k)).slice(0, 200);
   }
   function decodeImg(durl) {
@@ -249,6 +249,22 @@ export function createHandler(getStore) {
       return J({ email: me ? me.e : null, siteOwner: isOwner, ownerHint });
     }
     if (a === "logout" && method === "POST") return J({ ok: true }, 200, setCookie("", 0));
+
+    // ---- delete own account (self-service, GDPR-friendly) ----
+    // Cascade-deletes all memorials owned by the signed-in user, then the
+    // user record itself. The site owner is allowed to self-delete (they
+    // can always sign up again with the same email and regain access
+    // because SITE_OWNER_EMAIL still matches), but we block it from the
+    // Site Admin path to prevent a click from locking the dashboard.
+    if (a === "account" && method === "DELETE") {
+      if (!me) throw bad("Please sign in.", 401);
+      const { blobs } = await db().list({ prefix: "m/" });
+      const recs = (await Promise.all(blobs.map((x) => db().get(x.key, { type: "json" })))).filter(Boolean);
+      const userMems = recs.filter((r) => r.owner === me.e);
+      for (const r of userMems) await removeMemorial(r.id);
+      await db().delete("u/" + hex(me.e));
+      return J({ ok: true, deletedMemorials: userMems.length }, 200, setCookie("", 0));
+    }
 
     if ((a === "signup" || a === "login") && method === "POST") {
       const j = await body();
@@ -383,7 +399,22 @@ export function createHandler(getStore) {
         const rec = await db().get("refund/" + c, { type: "json" });
         if (!rec) throw bad("Refund request not found.", 404);
         rec.status = "approved";
+        rec.approvedAt = Date.now();
         await db().setJSON("refund/" + c, rec);
+        // Reset the user's plan to "free" so the Recent signups table
+        // reflects the return to the free tier. Also clear planDate so
+        // the user can re-purchase the same plan later if they want to.
+        if (rec.email) {
+          const userKey = "u/" + hex(rec.email.toLowerCase());
+          const u = await db().get(userKey, { type: "json" });
+          if (u) {
+            u.plan = "free";
+            u.planDate = null;
+            u.refundedPlan = rec.plan || null; // keep a record of which plan was refunded
+            u.refundedAt = Date.now();
+            await db().setJSON(userKey, u);
+          }
+        }
         // Attempt real refund via HandyPay if a payment reference is on file (best-effort)
         const hpKey = process.env.HANDYPAY_API_KEY;
         if (hpKey) {
@@ -407,6 +438,23 @@ export function createHandler(getStore) {
         const all = (await Promise.all(blobs.map((x) => db().get(x.key, { type: "json" })))).filter(Boolean);
         all.sort((x, y) => (y.created || 0) - (x.created || 0));
         return J({ list: all.slice(0, 200).map((u) => ({ email: u.email, plan: u.plan || "free", created: u.created })) });
+      }
+      // Admin deletes any user account. Cascade-deletes that user's memorials.
+      // Safeguards: cannot delete the site owner (would lock the dashboard),
+      // and cannot delete the admin's own account via this path (must use
+      // self-service "Delete my account" on /admin instead, which signs out).
+      if (b === "users" && c && d === "delete" && method === "DELETE") {
+        const targetEmail = String(c || "").trim().toLowerCase();
+        if (!targetEmail) throw bad("Missing email.", 400);
+        const ownerEmail = (process.env.SITE_OWNER_EMAIL || "").trim().toLowerCase();
+        if (ownerEmail && targetEmail === ownerEmail) throw bad("Cannot delete the site owner account via Site Admin. To remove yourself, change SITE_OWNER_EMAIL in Netlify env vars, redeploy, then use 'Delete my account' on /admin.", 400);
+        if (targetEmail === me.e) throw bad("Cannot delete your own account via Site Admin. Use 'Delete my account' on the My Account page instead.", 400);
+        const { blobs } = await db().list({ prefix: "m/" });
+        const recs = (await Promise.all(blobs.map((x) => db().get(x.key, { type: "json" })))).filter(Boolean);
+        const userMems = recs.filter((r) => r.owner === targetEmail);
+        for (const r of userMems) await removeMemorial(r.id);
+        await db().delete("u/" + hex(targetEmail));
+        return J({ ok: true, deletedMemorials: userMems.length });
       }
       throw bad("Not found.", 404);
     }
@@ -439,6 +487,24 @@ export function createHandler(getStore) {
           const key = "u/" + hex(email);
           const u = await db().get(key, { type: "json" });
           if (u) { u.plan = plan; u.planDate = Date.now(); await db().setJSON(key, u); }
+        }
+      }
+      // Refund events — reset the user's plan to "free"
+      const refundEvents = ["refund.succeeded", "refund.completed", "charge.refunded",
+                            "payment-session.refunded", "checkout.session.refunded"];
+      if (refundEvents.includes(ev.type)) {
+        const d = ev.data || {};
+        const email = (d.customer_email || d.metadata?.email || "").toLowerCase();
+        if (email) {
+          const key = "u/" + hex(email);
+          const u = await db().get(key, { type: "json" });
+          if (u) {
+            u.refundedPlan = u.plan || null;
+            u.plan = "free";
+            u.planDate = null;
+            u.refundedAt = Date.now();
+            await db().setJSON(key, u);
+          }
         }
       }
       return new Response(JSON.stringify({ received: true }), { status: 200 });
