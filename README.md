@@ -12,7 +12,12 @@ Or: `npm install && npx netlify-cli deploy --prod`
 | `RESEND_FROM` | Verified sender e.g. `Sweet Solace <admin@kwickbiz.biz>` |
 | `HANDYPAY_API_KEY` | From merchant.handypay.me → API Keys |
 | `HANDYPAY_WEBHOOK_SECRET` | From HandyPay portal → Webhooks |
-| `SITE_OWNER_EMAIL` | **New.** The email address of the account that should see the Site Admin panel. Must match exactly (case-insensitive) the email used to sign up/sign in. |
+| `SITE_OWNER_EMAIL` | The email address of the account that should see the Site Admin panel. Must match exactly (case-insensitive) the email used to sign up/sign in. Also used as the default recipient for contact form submissions. |
+
+## Optional environment variables
+| Variable | Description |
+|---|---|
+| `CONTACT_TO_EMAIL` | Email address that receives Contact Us form submissions. If not set, falls back to `SITE_OWNER_EMAIL`, then to `admin@kwickbiz.biz`. Useful if you want contact messages to go to a different inbox (e.g. `support@kwickbiz.biz`) than the site owner. |
 
 ## What's new in this release
 

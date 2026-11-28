@@ -66,6 +66,27 @@ const resetEmail = (toEmail, token, origin) => sendEmail({
     <p>This link expires in <strong>1 hour</strong>. If you didn't request this, you can safely ignore this email — your password won't change.</p>`),
 });
 
+// Contact form submission — sends to the site owner (or CONTACT_TO_EMAIL if set).
+// Bypasses Netlify Forms entirely (which is fragile on SPAs) and uses Resend
+// directly, which is already configured and working for password resets and
+// tribute notifications.
+const contactEmail = ({ fromName, fromEmail, message }) => {
+  const to = (process.env.CONTACT_TO_EMAIL || process.env.SITE_OWNER_EMAIL || "admin@kwickbiz.biz").trim();
+  const safeFrom = String(fromName || "Someone").replace(/[<>&"]/g, "");
+  const safeEmail = String(fromEmail || "unknown@example.com").replace(/[<>&"]/g, "");
+  const safeMsg = String(message || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return sendEmail({
+    to,
+    replyTo: safeEmail,
+    subject: `New contact message from ${safeFrom}`,
+    html: emailBase(`<h1>New contact message</h1>
+      <p><strong>From:</strong> ${safeFrom} &lt;${safeEmail}&gt;</p>
+      <p><strong>Message:</strong></p>
+      <blockquote style="border-left:4px solid #0ea5e9;padding-left:16px;color:#475569;font-style:italic;margin:16px 0;white-space:pre-wrap">${safeMsg}</blockquote>
+      <p class="text-xs text-slate-400">Reply directly to this email to respond to ${safeFrom}.</p>`),
+  });
+};
+
 export function createHandler(getStore) {
   const db = () => getStore({ name: "sweetsolace", consistency: "strong" });
   const im = () => getStore({ name: "sweetsolace-img", consistency: "strong" });
@@ -264,6 +285,23 @@ export function createHandler(getStore) {
       for (const r of userMems) await removeMemorial(r.id);
       await db().delete("u/" + hex(me.e));
       return J({ ok: true, deletedMemorials: userMems.length }, 200, setCookie("", 0));
+    }
+
+    // ---- contact form (uses Resend, bypasses Netlify Forms) ----
+    // Replaces the Netlify Forms-based contact form which silently broke on
+    // this SPA. Sends an email to CONTACT_TO_EMAIL (or SITE_OWNER_EMAIL or
+    // admin@kwickbiz.biz as a fallback). Validation runs BEFORE the rate
+    // limit so a typo doesn't burn the user's quota — same pattern as signup.
+    if (a === "contact" && method === "POST") {
+      const j = await body();
+      const name = str(j.name, 100, 1);
+      const email = str(j.email, 254, 3).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw bad("Please enter a valid email address.");
+      const message = str(j.message, 5000, 5);
+      await gate("contact:" + ip, 5, 36e5); // 5 messages per IP per hour
+      // Send the email (best-effort, but we await so we can surface errors)
+      await contactEmail({ fromName: name, fromEmail: email, message });
+      return J({ ok: true });
     }
 
     if ((a === "signup" || a === "login") && method === "POST") {
