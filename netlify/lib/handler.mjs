@@ -115,7 +115,7 @@ export function createHandler(getStore) {
     return s;
   };
   const yr = (v) => { const n = Number(v); if (!Number.isInteger(n) || n < 1000 || n > 2100) throw bad("Invalid year."); return n; };
-  const pub = (r, me) => ({ id: r.id, name: r.name, b: r.b, d: r.d, cat: r.cat, story: r.story, pic: r.pv ? `/api/img/${r.id}/pic?v=${r.pv}` : "", mine: !!(me && r.owner === me.e), music: r.mine || (me && r.owner===me.e) ? (r.music||"") : (r.music||""), musicOn: !!r.musicOn, isPrivate: !!r.isPrivate, tributeMode: r.tributeMode||"open" });
+  const pub = (r, me) => ({ id: r.id, name: r.name, b: r.b, d: r.d, cat: r.cat, story: r.story, pic: r.pv ? `/api/img/${r.id}/pic?v=${r.pv}` : "", accentColor: r.accentColor || "", mine: !!(me && r.owner === me.e), music: r.music||"", musicOn: !!r.musicOn, isPrivate: !!r.isPrivate, tributeMode: r.tributeMode||"open" });
   const owned = async (id, me) => {
     if (!me) throw bad("Please sign in.", 401);
     const r = await getRec(id);
@@ -237,7 +237,17 @@ export function createHandler(getStore) {
     }
 
     // ---- accounts ----
-    if (a === "me" && method === "GET") return J({ email: me ? me.e : null });
+    if (a === "me" && method === "GET") {
+      // Trim whitespace defensively — Netlify env vars often carry an
+      // invisible trailing newline when pasted from a mail client.
+      const ownerEmail = (process.env.SITE_OWNER_EMAIL || "").trim().toLowerCase();
+      const isOwner = !!(me && ownerEmail && me.e === ownerEmail);
+      // When the visitor IS signed in (as anyone), expose a masked hint of
+      // the configured owner email so they can self-diagnose "not authorised".
+      // First char + domain (k***@yahoo.com) — never exposes the full address.
+      const ownerHint = me && ownerEmail ? ownerEmail.replace(/^(.)([^@]*)(@.+)$/, (_, a, _b, c) => a + "***" + c) : null;
+      return J({ email: me ? me.e : null, siteOwner: isOwner, ownerHint });
+    }
     if (a === "logout" && method === "POST") return J({ ok: true }, 200, setCookie("", 0));
 
     if ((a === "signup" || a === "login") && method === "POST") {
@@ -302,6 +312,105 @@ export function createHandler(getStore) {
     }
 
     // ---- HandyPay webhook ----
+    // ---- site owner check ----
+    const requireOwner = () => {
+      // Trim whitespace defensively (see /api/me above).
+      const ownerEmail = (process.env.SITE_OWNER_EMAIL || "").trim().toLowerCase();
+      if (!me || !ownerEmail || me.e !== ownerEmail) throw bad("Site admin access only.", 403);
+    };
+
+    const DEFAULT_PLANS = [
+      ["free", "Free", "$0", "Free forever", ["1 memorial page with portrait & dates", "Life story & photo gallery (up to 6 photos)", "Candles & tributes from visitors", "Shareable public link", "Basic support via email"], 0],
+      ["lifetime", "Lifetime", "$79", "One-time — no subscription", ["Everything in Free", "Unlimited photos & videos", "Birthday & anniversary reminders", "Kept online for generations", "Priority email support", "Password-protected private mode"], 7900],
+      ["family", "Family", "$129", "One-time — covers up to 5 memorials", ["Everything in Lifetime", "Up to 5 linked memorials", "Invite co-editors for each memorial", "Printable memorial book (PDF)", "Dedicated support"], 12900],
+    ];
+
+    // ---- site config (plans & settings) — readable by anyone, writable by owner only ----
+    if (a === "site-config") {
+      if (method === "GET") {
+        const cfg = (await db().get("site/config", { type: "json" })) || {};
+        return J({ config: { plans: cfg.plans || DEFAULT_PLANS, tagline: cfg.tagline || "", supportEmail: cfg.supportEmail || "admin@kwickbiz.biz" } });
+      }
+      if (b === "plan" && method === "PATCH") {
+        requireOwner();
+        const j = await body();
+        const idx = Number.isInteger(j.idx) ? j.idx : -1;
+        const cfg = (await db().get("site/config", { type: "json" })) || {};
+        const plans = cfg.plans || DEFAULT_PLANS.map((p) => [...p]);
+        if (idx < 0 || idx >= plans.length) throw bad("Invalid plan index.");
+        const name = str(j.name, 60, 1), price = str(j.price, 20, 1), tagline = str(j.tagline, 200, 0);
+        const amount = Number.isFinite(+j.amount) ? Math.max(0, Math.round(+j.amount)) : plans[idx][5];
+        const features = Array.isArray(j.features) ? j.features.map((f) => str(f, 200, 0)).filter(Boolean).slice(0, 20) : plans[idx][4];
+        plans[idx] = [plans[idx][0], name, price, tagline, features, amount];
+        cfg.plans = plans;
+        await db().setJSON("site/config", cfg);
+        return J({ ok: true });
+      }
+      if (b === "settings" && method === "PATCH") {
+        requireOwner();
+        const j = await body();
+        const cfg = (await db().get("site/config", { type: "json" })) || {};
+        if ("tagline" in j) cfg.tagline = str(j.tagline, 200, 0);
+        if ("supportEmail" in j) cfg.supportEmail = str(j.supportEmail, 254, 0);
+        await db().setJSON("site/config", cfg);
+        return J({ ok: true });
+      }
+      throw bad("Not found.", 404);
+    }
+
+    // ---- refund requests ----
+    if (a === "refund-request" && method === "POST") {
+      if (!me) throw bad("Please sign in.", 401);
+      await gate("refund:" + me.e, 5, DAY);
+      const j = await body();
+      const plan = str(j.plan, 30, 1);
+      const reason = str(j.reason || "No reason given.", 1000, 0);
+      const rid_ = rid(8);
+      await db().setJSON("refund/" + rid_, { id: rid_, email: me.e, plan, reason, date: Date.now(), status: "pending" });
+      return J({ ok: true }, 201);
+    }
+
+    // ---- site admin: refunds & users (owner only) ----
+    if (a === "site-admin") {
+      requireOwner();
+      if (b === "refunds" && method === "GET") {
+        const { blobs } = await db().list({ prefix: "refund/" });
+        const all = (await Promise.all(blobs.map((x) => db().get(x.key, { type: "json" })))).filter((r) => r && r.status === "pending");
+        all.sort((x, y) => y.date - x.date);
+        return J({ list: all.slice(0, 100) });
+      }
+      if (b === "refunds" && c && d === "approve" && method === "POST") {
+        const rec = await db().get("refund/" + c, { type: "json" });
+        if (!rec) throw bad("Refund request not found.", 404);
+        rec.status = "approved";
+        await db().setJSON("refund/" + c, rec);
+        // Attempt real refund via HandyPay if a payment reference is on file (best-effort)
+        const hpKey = process.env.HANDYPAY_API_KEY;
+        if (hpKey) {
+          fetch("https://api.handypay.me/api/v1/refunds", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${hpKey}`, "Content-Type": "application/json", "Idempotency-Key": rid(16) },
+            body: JSON.stringify({ customer_email: rec.email, reason: "customer_request" }),
+          }).catch((e) => console.error("HandyPay refund call failed", e));
+        }
+        return J({ ok: true });
+      }
+      if (b === "refunds" && c && d === "decline" && method === "POST") {
+        const rec = await db().get("refund/" + c, { type: "json" });
+        if (!rec) throw bad("Refund request not found.", 404);
+        rec.status = "declined";
+        await db().setJSON("refund/" + c, rec);
+        return J({ ok: true });
+      }
+      if (b === "users" && method === "GET") {
+        const { blobs } = await db().list({ prefix: "u/" });
+        const all = (await Promise.all(blobs.map((x) => db().get(x.key, { type: "json" })))).filter(Boolean);
+        all.sort((x, y) => (y.created || 0) - (x.created || 0));
+        return J({ list: all.slice(0, 200).map((u) => ({ email: u.email, plan: u.plan || "free", created: u.created })) });
+      }
+      throw bad("Not found.", 404);
+    }
+
     if (a === "webhook" && method === "POST") {
       const raw = await req.text();
       const secret = process.env.HANDYPAY_WEBHOOK_SECRET;
@@ -370,7 +479,12 @@ export function createHandler(getStore) {
         if (!CATS.has(j.cat)) throw bad("Invalid category.");
         const slug = (first + "-" + last).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "memorial";
         const id = slug + "-" + rid(2);
-        const rec = { id, name: first + " " + last, b: bY, d: dY, cat: j.cat, story: str(j.story || "Remembered with love.", 5000, 1), owner: me.e, pv: 0, photos: [], events: [], created: Date.now() };
+        let accentColor = "";
+        if (j.accentColor) {
+          const c = String(j.accentColor).trim();
+          if (/^#[0-9a-fA-F]{6}$/.test(c)) accentColor = c;
+        }
+        const rec = { id, name: first + " " + last, b: bY, d: dY, cat: j.cat, story: str(j.story || "Remembered with love.", 5000, 1), owner: me.e, pv: 0, accentColor, photos: [], events: [], created: Date.now() };
         if (j.pic) { await putImg(id + "/pic", j.pic); rec.pv = Date.now(); }
         await saveRec(rec);
         // Welcome email (non-blocking)
@@ -384,6 +498,15 @@ export function createHandler(getStore) {
     if (!okId(b)) throw bad("Not found.", 404);
     const rec = await getRec(b);
     if (!rec && !SEED.has(b)) throw bad("Not found.", 404);
+
+    // Privacy check: private memorials are visible only to their owner.
+    // For everyone else (signed-out or signed-in as a different account)
+    // the memorial is treated as "Not found" — so the direct link no
+    // longer reveals it. Owners must be signed in to view their own
+    // private memorials.
+    if (rec && rec.isPrivate && (!me || rec.owner !== me.e)) {
+      throw bad("Not found.", 404);
+    }
 
     if (!c) {
       if (method === "GET") {
@@ -484,6 +607,11 @@ export function createHandler(getStore) {
         if (!["open","moderated","closed"].includes(j.tributeMode)) throw bad("Invalid tribute mode.");
         r.tributeMode = j.tributeMode;
       }
+      if ("accentColor" in j) {
+        const c = String(j.accentColor || "").trim();
+        if (c && !/^#[0-9a-fA-F]{6}$/.test(c)) throw bad("Invalid colour — expected a hex value like #0ea5e9.");
+        r.accentColor = c;
+      }
       await saveRec(r); return J({ ok: true });
     }
 
@@ -531,6 +659,3 @@ export function createHandler(getStore) {
     }
   };
 }
-// ---- PATCH: extend handle() to cover new routes ----
-// We monkey-patch by wrapping the exported factory.
-import { createHandler as _orig } from "./handler.mjs";
